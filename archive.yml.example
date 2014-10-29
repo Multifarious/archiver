@@ -1,0 +1,29 @@
+server:
+  applicationConnectors:
+    - type: http
+      port: 8090
+  adminConnectors:
+    - type: http
+      port: 8091
+
+logging:
+  level: INFO
+  appenders:
+    - type: console
+
+seedBrokers: localhost:9092
+zookeeperServerstring: localhost:2181
+
+kafkaMessagePartitionerConfig:
+  cdn_log:
+    dateExtractRegex: "<[0-9]*>([^\\s]+).*"
+    dateTimeFormatPattern: "yyyy-MM-dd'T'HH:mm:ssZZ"
+  bid_requests:
+    dateExtractRegex: "([0-9]+):.*"
+  bid_responses:
+    dateExtractRegex: "([0-9]+):.*"
+
+s3Configuration:
+  accessKeyId: foobar
+  secretAccessKey: foobar
+  bucket: my-archive-bucket-name
