@@ -69,6 +69,7 @@ public class ArchiveApplication extends Application<ArchiveConfiguration> {
 
         ArchiveListener listener = new ArchiveListener(s3Client, configuration.getS3Configuration(),
                 configuration.getSeedBrokers(), workUnitPath, kafkaMessagePartitioner);
+        environment.lifecycle().manage(listener);
 
         ClusterConfig clusterConfig = new ClusterConfig()
                 .setHosts(configuration.getZookeeperServerstring())

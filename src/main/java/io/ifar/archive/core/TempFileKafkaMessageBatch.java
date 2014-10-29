@@ -10,15 +10,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.nio.charset.Charset;
 import java.util.*;
 
 public class TempFileKafkaMessageBatch implements KafkaMessageBatch {
     final static Logger LOG = LoggerFactory.getLogger(TempFileKafkaMessageBatch.class);
 
-    private HashMap<String, File> tempFiles = new HashMap<>();
-    private HashMap<String, BufferedWriter> tempFileWriters = new HashMap<>();
+    private final Map<String, FileBackedWriter> tempWriters = new HashMap<>();
 
-    private Set<String> currentBatchFilesWritten = new HashSet<>();   // objects in S3
+    /**
+     * Set of entries that (may) have been written in S3; needed to handle interruptions
+     * during batch write, atomic rollback.
+     */
+    private Set<String> currentBatchFilesWritten = new HashSet<>();
 
     private S3Configuration s3Configuration;
     private AmazonS3Client s3Client;
@@ -29,72 +33,139 @@ public class TempFileKafkaMessageBatch implements KafkaMessageBatch {
     }
 
     @Override
-    public void addMessageToArchiveQueue(String archiveBatchKey, String message) throws Exception {
-        BufferedWriter writer = tempFileWriters.get(archiveBatchKey);
-        if(writer == null) {
-            File tempFile = File.createTempFile(archiveBatchKey, null);
-            writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(tempFile)));
-            tempFiles.put(archiveBatchKey, tempFile);
-            tempFileWriters.put(archiveBatchKey, writer);
+    public void addMessageToArchiveQueue(String archiveBatchKey, byte[] message) throws Exception {
+        FileBackedWriter writer = tempWriters.get(archiveBatchKey);
+        if (writer == null) {
+            writer = FileBackedWriter.create(archiveBatchKey);
+            tempWriters.put(archiveBatchKey, writer);
         }
-        writer.write(message);
-        writer.newLine();
+        writer.writeLine(message);
     }
 
     @Override
     public void writeToArchive() throws Exception {
+        if (tempWriters.isEmpty()) {
+            return;
+        }
         try {
-            for (Map.Entry<String, File> tempFileEntry : tempFiles.entrySet()) {
-                String key = tempFileEntry.getKey();
-                File tempFile = tempFileEntry.getValue();
-                BufferedWriter tempFileWriter = tempFileWriters.get(key);
-                tempFileWriter.close();
-                LOG.debug("Writing temp file {} ({} bytes) to {}", tempFile.getName(), tempFile.length(), key);
+            // Let's actually do this in two loops, to make it more likely things are more batch-atomic;
+            // first, flush and close all temporary files; second, try to upload.
+            LOG.debug("writeToArchive: closing {} temp files.", tempWriters.size());
+            for (FileBackedWriter w : tempWriters.values()) {
+                w.close();
+            }
+
+            LOG.debug("writeToArchive: uploading {} temp files.", tempWriters.size());
+            Iterator<Map.Entry<String, FileBackedWriter>> it = tempWriters.entrySet().iterator();
+            while (it.hasNext()) {
+                final FileBackedWriter tempWriter = it.next().getValue();
+                final String key = tempWriter.getKey();
+                final File tempFile = tempWriter.getFile();
+                if (LOG.isDebugEnabled()) { // just because file.length() causes I/O access
+                    LOG.debug("Writing temp file {} ({} bytes) to {}", tempFile.getName(), tempFile.length(), key);
+                }
                 PutObjectRequest request = new PutObjectRequest(s3Configuration.getBucket(), key, tempFile);
-                s3Client.putObject(request);
+                // add first, so that set contains anything that may have been uploaded
                 currentBatchFilesWritten.add(key);
+                s3Client.putObject(request);
                 LOG.debug("Completed put of {}", key);
-                tempFileWriters.remove(key);
-                if(tempFile.delete())
+
+                it.remove();
+
+                if (tempFile.delete())
                     LOG.debug("Deleted temp file {}", tempFile.getName());
                 else
                     LOG.warn("Failed to delete temp file {}", tempFile.getName());
             }
-            return;
         } catch(AbortedException e) {
             LOG.info("AbortedException thrown while writing S3 files; throwing InterruptedException", e);
-            throw new InterruptedException();
+            throw new InterruptedException(e.getMessage());
         }
     }
 
     @Override
     public void deleteArchiveBatch() throws InterruptedException {
-        for(Map.Entry<String, BufferedWriter> entry : tempFileWriters.entrySet()) {
+        Iterator<Map.Entry<String, FileBackedWriter>> it = tempWriters.entrySet().iterator();
+        while (it.hasNext()) {
+            FileBackedWriter tempWriter = it.next().getValue();
+            it.remove();
+
+            final String key = tempWriter.getKey();
+
             try {
-                entry.getValue().close();
+                tempWriter.close();
             } catch (IOException e) {
-                LOG.warn("Expected writer to temp file " + entry.getKey() + " to be open, but was closed", e);
+                LOG.warn("Expected writer to temp file " + key + " to be open, but was closed", e);
             }
-            File tempFile = tempFiles.get(entry.getKey());
-            if(tempFile.delete())
+            File tempFile = tempWriter.getFile();
+            if (tempFile.delete())
                 LOG.debug("Deleted temp file {}", tempFile.getName());
             else
                 LOG.warn("Failed to delete temp file {}", tempFile.getName());
         }
 
-        try {
-            for (String fileKey : currentBatchFilesWritten) {
+        // and then files already uploaded in S3, if any
+        Iterator<String> s3it = currentBatchFilesWritten.iterator();
+        while (it.hasNext()) {
+            String fileKey = s3it.next();
+            it.remove();
+            try {
                 DeleteObjectRequest request = new DeleteObjectRequest(s3Configuration.getBucket(), fileKey);
                 s3Client.deleteObject(request); // will succeed if object does not exist
+            } catch (AbortedException e) {
+                LOG.info("AbortedException thrown while deleting S3 files; throwing InterruptedException", e);
+                throw new InterruptedException(e.getMessage());
             }
-        } catch(AbortedException e) {
-            LOG.info("AbortedException thrown while deleting S3 files; throwing InterruptedException", e);
-            throw new InterruptedException();
         }
     }
 
     @Override
     public int size() {
-        return tempFiles.size();
+        return tempWriters.size();
+    }
+
+    /**
+     * Helper class for containing in-flight state of a buffered entry.
+     */
+    private final static class FileBackedWriter
+        implements Closeable
+    {
+        private final static byte LF = '\n';
+
+        private final String key;
+        private final File file;
+        private final OutputStream writer;
+
+        private boolean closed;
+
+        private FileBackedWriter(String k, File f, OutputStream w) {
+            key = k;
+            file = f;
+            writer = w;
+        }
+
+        public static FileBackedWriter create(String key) throws IOException {
+            File tempFile = File.createTempFile(key, null);
+            BufferedOutputStream w = new BufferedOutputStream(new FileOutputStream(tempFile));
+            return new FileBackedWriter(key, tempFile, w);
+        }
+
+        public String getKey() { return key; }
+        public File getFile() { return file; }
+
+        public void writeLine(byte[] content) throws IOException {
+            writer.write(content);
+            writer.write(LF);
+        }
+
+        @Override
+        public void close() throws IOException {
+            // calling close() twice on OutputStream may or may not be problematic, but
+            // let's try to reduce noise here
+            if (!closed) {
+                closed = true;
+                writer.close();
+            }
+        }
     }
 }

@@ -47,10 +47,10 @@ public class AddPartitionCommand extends BaseZkCommand {
         ArrayList<String> parts = new ArrayList<>();
         if(partitionStr.contains(",")) {
             for(String part : partitionStr.split(",")) {
-                parts.add(part);
+                parts.add(part.trim());
             }
         } else {
-            parts.add(partitionStr);
+            parts.add(partitionStr.trim());
         }
 
         for(String part : parts) {

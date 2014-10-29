@@ -8,6 +8,7 @@ import com.twitter.common.zookeeper.ZooKeeperClient;
 import com.yammer.metrics.scala.Meter;
 import io.ifar.archive.ArchiveApplication;
 import io.ifar.archive.S3Configuration;
+import io.ifar.archive.core.partitioner.ArchivePartitionData;
 import io.ifar.archive.core.partitioner.KafkaMessagePartitioner;
 import kafka.api.FetchRequestBuilder;
 import kafka.api.PartitionOffsetRequestInfo;
@@ -30,34 +31,35 @@ import java.util.concurrent.atomic.AtomicBoolean;
 class ArchiveWorker implements Runnable {
     final static Logger LOG = LoggerFactory.getLogger(ArchiveWorker.class);
 
+    private final static int maxBatchTime = 60000;
+    private final static int maxBatchCount = 10000;
+    private final static int fetchSize = 1000000;
+    private final static int simpleConsumerTimeout = 10000;
+    private final static int simpleConsumerBufferSize = 1024000;
+
     private final AmazonS3Client s3Client;
     private final S3Configuration s3Configuration;
     private final KafkaMessagePartitioner kafkaMessagePartitioner;
 
-    private Map<String, ArchiveWorker> workers;
+    private final AtomicBoolean stopFlag = new AtomicBoolean(false);
 
     private final ZooKeeperClient zkClient;
-    private String zkWorkPath;
+    private final String zkWorkPath;
 
     private final List<String> seedBrokers;
     private final List<String> replicaBrokers;
-    private final int maxBatchTime = 60000;
-    private final int maxBatchCount = 10000;
-    private final int fetchSize = 1000000;
-    private final int simpleConsumerTimeout = 10000;
-    private final int simpleConsumerBufferSize = 1024000;
 
     private final String workUnit;
     public final Meter meter;
     private NodeData partitionState;
     private int version;
+
     private final AtomicBoolean terminated = new AtomicBoolean(false);
 
     public ArchiveWorker(String workUnit, Meter meter, NodeData data, int version,
                          List<String> seedBrokers,
                          AmazonS3Client s3Client, S3Configuration s3Configuration,
                          ZooKeeperClient zkClient,
-                         Map<String, ArchiveWorker> workers,
                          String zkWorkPath,
                          KafkaMessagePartitioner kafkaMessagePartitioner)
     {
@@ -70,9 +72,12 @@ class ArchiveWorker implements Runnable {
         this.s3Client = s3Client;
         this.s3Configuration = s3Configuration;
         this.zkClient = zkClient;
-        this.workers = workers;
         this.zkWorkPath = zkWorkPath;
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
+    }
+
+    public void requestStop() {
+        stopFlag.set(true);
     }
 
     public boolean isTerminated() {
@@ -196,9 +201,49 @@ class ArchiveWorker implements Runnable {
         return offsets[0];
     }
 
+
     @Override
     public void run() {
+        // This loop forms what used to be considered "supervisor"
+
+        int count = 0;
+
+        try {
+            while (!stopFlag.get()) {
+                if (++count > 1) {
+                    LOG.info("Restarting archive worker '{}'", workUnit);
+                }
+                try {
+                    runLoop();
+                } catch (Throwable t) {
+                    // let's try to detect "valid" exit via InterruptedException
+                    while (t.getCause() != null) {
+                        t = t.getCause();
+                    }
+                    if ((t instanceof InterruptedException) && stopFlag.get()) {
+                        break;
+                    }
+                    LOG.warn("Archive worker loop interrupted due to uncaught exception: " + t.getMessage(), t);
+                }
+                if (stopFlag.get()) {
+                    break;
+                }
+                // Could make thread wait exponential amount of time, but does not seem necessary here
+                try {
+                    Thread.sleep(1000L);
+                } catch (Throwable t) {
+                }
+            }
+        } finally {
+            terminated.set(true);
+        }
+    }
+
+    private void runLoop() throws InterruptedException
+    {
         SimpleConsumer consumer = null;
+        KafkaMessageBatch messageBatch = null;
+
         try {
             LOG.info("Archive worker thread started for {}, partition {}, starting offset of {}",
                     partitionState.getTopic(), partitionState.getPartition(), partitionState.getOffset());
@@ -241,27 +286,21 @@ class ArchiveWorker implements Runnable {
             int numErrors = 0;
             while (true) {
                 Map<String, String> messageBatchKeys = new HashMap<>();
-                KafkaMessageBatch messageBatch = new TempFileKafkaMessageBatch(s3Configuration, s3Client);
+                messageBatch = new TempFileKafkaMessageBatch(s3Configuration, s3Client);
                 long batchStartOffset = readOffset;
                 LOG.debug(String.format("Starting batch for worker %s at offset %d", workUnit, readOffset));
                 // we want to write out and commit a batch approximately every minute (or every n records)
                 int batchNumRead = 0;
                 long batchStart = System.currentTimeMillis();
-                while(System.currentTimeMillis() - batchStart < maxBatchTime && batchNumRead < maxBatchCount) {
+
+                while((System.currentTimeMillis() - batchStart) < maxBatchTime && (batchNumRead < maxBatchCount)) {
+                    if (endIsNigh()) {
+                        messageBatch.deleteArchiveBatch();
+                        return;
+                    }
                     if (LOG.isTraceEnabled()) {
                         LOG.trace(String.format("%s:\t%d\t%d", workUnit, (System.currentTimeMillis() - batchStart), batchNumRead));
                     }
-
-                    if (Thread.interrupted()) {
-                        LOG.info("Worker {} interrupted. Terminating worker.", workUnit);
-                        return;
-                    }
-                    if(!this.equals(workers.get(workUnit))) {
-                        // Additional check in case the interrupt is not properly handled.
-                        LOG.info("Worker {} did not find itself in the set of supervised workers. Terminating worker.", workUnit);
-                        return;
-                    }
-
                     if (consumer == null) {
                         consumer = new SimpleConsumer(leadBroker.host(), leadBroker.port(), simpleConsumerTimeout, simpleConsumerBufferSize, clientName);
                     }
@@ -287,16 +326,20 @@ class ArchiveWorker implements Runnable {
                         try {
                             leadBroker = findNewLeader(leadBroker);
                         } catch (Exception e) {
-                            e.printStackTrace();
+                            LOG.warn("Problems finding new leader", e);
                         }
                         continue;
                     }
                     numErrors = 0;
 
                     long numRead = 0;
-                    String topic = partitionState.getTopic();
-                    int partition = partitionState.partition();
+                    final String topic = partitionState.getTopic();
+                    final int partition = partitionState.partition();
                     for (MessageAndOffset messageAndOffset : fetchResponse.messageSet(topic, partition)) {
+                        if (endIsNigh()) {
+                            messageBatch.deleteArchiveBatch();
+                            return;
+                        }
                         long currentOffset = messageAndOffset.offset();
                         if (currentOffset < readOffset) {
                             LOG.error("Found an old offset {}, expecting {}", currentOffset, readOffset);
@@ -308,9 +351,9 @@ class ArchiveWorker implements Runnable {
                         byte[] bytes = new byte[payload.limit()];
                         payload.get(bytes);
 
-                        KafkaMessagePartitioner.ArchivePartitionData apd =
+                        ArchivePartitionData apd =
                                 kafkaMessagePartitioner.archivePartitionFor(topic, partition, bytes);
-                        String message = apd.message;
+                        byte[] message = apd.message;
                         String archivePartition = apd.archivePartition;
                         Date dt = apd.archiveTime;
 
@@ -328,11 +371,7 @@ class ArchiveWorker implements Runnable {
                     }
 
                     if (numRead == 0) {
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                        }
+                        Thread.sleep(1000);
                     }
                     else {
                         meter.mark(numRead);
@@ -340,49 +379,78 @@ class ArchiveWorker implements Runnable {
                     }
                 }
 
-                if(messageBatch.size() > 0) {
+                if (messageBatch.size() > 0) {
                     try {
                         messageBatch.writeToArchive();
+                        messageBatch = null; // to ensure no rollback
                         commit(readOffset);
                     } catch (InterruptedException e) {
                         LOG.info(String.format("Worker thread %s interrupted while writing and committing batch; " +
                                 "deleting S3 files and terminating worker thread", workUnit));
-                        try {
+                        if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
-                        } finally {
-                            return;
                         }
+                        return;
                     } catch (KeeperException.BadVersionException e) {
                         LOG.warn("Zookeeper version out of sync for worker {}. Terminating worker thread.", workUnit);
-                        try {
+                        if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
-                        } finally {
-                            return;
                         }
+                        return;
                     } catch (Exception e) {
+                        readOffset = batchStartOffset;
                         try {
                             LOG.warn(String.format("Exception writing batch for worker %s; deleting S3 files and resetting read offset to %d", workUnit, batchStartOffset), e);
-                            messageBatch.deleteArchiveBatch();
-                            readOffset = batchStartOffset;
+                            if (messageBatch != null) {
+                                messageBatch.deleteArchiveBatch();
+                            }
                         } catch (Exception re) {
-                            re.printStackTrace();
                             LOG.error("Couldn't delete S3 files for batch while rolling back.", re);
+                            if (re instanceof RuntimeException) {
+                                throw (RuntimeException) re;
+                            }
                             throw new RuntimeException(re);
                         }
                     }
                 }
             }
         } catch (Exception e) {
+            // Ok; we failed, let's roll back (note: deletion is idempotent)
+            if (messageBatch != null) {
+                try {
+                    messageBatch.deleteArchiveBatch();
+                } catch (Exception e2) {
+                    LOG.warn("Secondary fail during archive roll back; possibly harmless: {}", e2.getMessage());
+                }
+            }
+            if (e instanceof InterruptedException) { // cleaner if caller can detect this appropriately
+                throw (InterruptedException) e;
+            }
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
+            }
             LOG.error("Unhandled exception in ArchiveWorker thread", e);
             throw new RuntimeException(e);
-        } catch (Throwable t) {
-            t.printStackTrace();
-            throw t;
         } finally {
-            terminated.set(true);
             if (consumer != null) {
-                consumer.close();
+                try {
+                    consumer.close();
+                } catch (Exception e) {
+                    LOG.warn("Problems closing SimpleConsumer", e);
+                }
             }
         }
+    }
+
+    private boolean endIsNigh() {
+        if (stopFlag.get()) {
+            LOG.info("Archive worker {} stop requested. Terminating worker.", workUnit);
+            return true;
+        }
+        if (Thread.interrupted()) {
+            LOG.info("Archive worker {} interrupted. Terminating worker.", workUnit);
+            return true;
+        }
+        return false;
     }
 }

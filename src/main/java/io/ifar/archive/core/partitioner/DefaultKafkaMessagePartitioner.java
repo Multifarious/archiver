@@ -8,7 +8,6 @@ import java.util.Date;
 public class DefaultKafkaMessagePartitioner implements KafkaMessagePartitioner {
     @Override
     public ArchivePartitionData archivePartitionFor(String topic, int partition, byte[] rawMessagePayload) {
-        String message = new String(rawMessagePayload);
-        return new ArchivePartitionData(message, String.format("%d", partition), new Date());
+        return new ArchivePartitionData(rawMessagePayload, String.valueOf(partition), new Date());
     }
 }
