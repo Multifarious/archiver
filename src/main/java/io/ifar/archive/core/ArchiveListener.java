@@ -1,69 +1,73 @@
 package io.ifar.archive.core;
 
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.boundary.ordasity.SmartListener;
+import io.dropwizard.lifecycle.Managed;
 import io.ifar.archive.ArchiveApplication;
 import io.ifar.archive.S3Configuration;
 import com.twitter.common.zookeeper.ZooKeeperClient;
 import com.yammer.metrics.scala.Meter;
 import io.ifar.archive.core.partitioner.KafkaMessagePartitioner;
-import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.util.*;
-import java.util.concurrent.*;
-
-public class ArchiveListener extends SmartListener {
+public class ArchiveListener extends SmartListener
+        implements Managed
+{
     final Logger LOG = LoggerFactory.getLogger(getClass());
 
-    private ExecutorService executor;
-
-    static class NamedThreadRunnable implements Runnable {
-        private final Runnable runnable;
-        private final String threadName;
-        public NamedThreadRunnable(Runnable runnable, String threadName) {
-            this.runnable = runnable;
-            this.threadName = threadName;
-        }
-        @Override
-        public void run() {
-            String originalName = Thread.currentThread().getName();
-            Thread.currentThread().setName(threadName);
-            try {
-                runnable.run();
-            } finally {
-                Thread.currentThread().setName(originalName);
-            }
-        }
-    }
+    private final ExecutorService executor;
+    private final AtomicBoolean stopFlag = new AtomicBoolean(false);
 
     private final AmazonS3Client s3Client;
     private final S3Configuration s3Configuration;
     private final KafkaMessagePartitioner kafkaMessagePartitioner;
 
-    private List<String> seedBrokers = new ArrayList<String>();
+    private final List<String> seedBrokers;
+    private final String zkWorkPath;
 
     private ZooKeeperClient zkClient;
-    private String zkWorkPath;
 
-    private ConcurrentHashMap<String, Future> workerFutures = new ConcurrentHashMap<>();
-    private ConcurrentHashMap<String, ArchiveWorker> workers = new ConcurrentHashMap<>();
-    private Future<?> archiveSupervisor;
+    private final Map<String, WorkerState> workers = new HashMap<String, WorkerState>();
 
-    public ArchiveListener(AmazonS3Client s3Client, S3Configuration s3Configuration, String seedBrokers, String workUnitName,
+    public ArchiveListener(AmazonS3Client s3Client, S3Configuration s3Configuration, String seedBrokers, String workUnitPath,
                            KafkaMessagePartitioner kafkaMessagePartitioner) {
         this.s3Client = s3Client;
         this.s3Configuration = s3Configuration;
         this.seedBrokers = Arrays.asList(seedBrokers.split(","));
-        this.zkWorkPath = "/" + workUnitName + "/";
+        this.zkWorkPath = "/" + workUnitPath + "/";
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
+        this.executor = Executors.newCachedThreadPool();
+    }
+
+    @Override
+    public void start() throws Exception { }
+
+    @Override
+    public void stop() throws Exception {
+        stopFlag.set(true);
+        List<WorkerState> states;
+        synchronized (workers) {
+            states = new ArrayList<>(workers.values());
+            workers.clear();
+        }
+        for (WorkerState ws : states) {
+            ws.requestStop();
+        }
+        executor.shutdownNow();
     }
 
     @Override
     public void startWork(String workUnit, Meter meter) {
+        if (stopFlag.get()) {
+            LOG.warn("startWork({}) called during shutdown", workUnit);
+            return;
+        }
         Stat stat = new Stat();
         try {
             byte[] zkData = zkClient.get().getData(zkWorkPath + workUnit, false, stat);
@@ -71,50 +75,44 @@ public class ArchiveListener extends SmartListener {
             int version = stat.getVersion();
 
             ArchiveWorker worker = new ArchiveWorker(workUnit, meter, data, version,
-                    seedBrokers, s3Client, s3Configuration, zkClient, workers, zkWorkPath, kafkaMessagePartitioner);
-            workers.put(workUnit, worker);
+                    seedBrokers, s3Client, s3Configuration, zkClient, zkWorkPath, kafkaMessagePartitioner);
             Future workerFuture = executor.submit(new NamedThreadRunnable(worker, "worker_" + workUnit));
-            workerFutures.put(workUnit, workerFuture);
-        } catch (KeeperException e) {
-            e.printStackTrace();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        } catch (ZooKeeperClient.ZooKeeperConnectionException e) {
-            e.printStackTrace();
-        } catch (IOException e) { // includes Json[Xxx]Exceptions
-            e.printStackTrace();
+            synchronized (workers) {
+                workers.put(workUnit, new WorkerState(worker, workerFuture));
+            }
+        } catch (Exception e) {
+            LOG.warn("startWork() failed", e);
         }
-        // need to figure out how to deal with exceptions here
     }
+
 
     @Override
     public void onJoin(ZooKeeperClient zkClient) {
         this.zkClient = zkClient;
-        this.executor = Executors.newCachedThreadPool();
-        archiveSupervisor = executor.submit(new ArchiveSupervisor());
     }
 
     @Override
-    public void onLeave() {
-        executor.shutdownNow();
-    }
+    public void onLeave() { }
 
     @Override
     public void shutdownWork(String workUnit) {
-        Future workerFuture = workerFutures.remove(workUnit);
-        if(workerFuture != null) {
-            workerFuture.cancel(true);
+        WorkerState state;
+        synchronized (workers) {
+            state = workers.remove(workUnit);
         }
-        ArchiveWorker worker = workers.remove(workUnit);
-        if (worker == null) {
-            LOG.error("No worker found for id '{}', ignoring", workUnit);
+        if (state == null) {
+            // Ordasity might feel compelled to call that; if so, consider that ok
+            if (!stopFlag.get()) {
+                LOG.error("No worker state found for id '{}', ignoring", workUnit);
+            }
             return;
         }
+        state.requestStop();
 
         // let's not wait indefinitely for shutdown, 15 seconds better suffice
         final long end = System.currentTimeMillis() + (15 * 1000L);
 
-        while (!worker.isTerminated()) {
+        while (!state.isTerminated()) {
             LOG.info("Waiting one second for worker {} to terminate...", workUnit);
             try {
                 Thread.sleep(1000);
@@ -129,38 +127,25 @@ public class ArchiveListener extends SmartListener {
         }
     }
 
-    // Polls active workers and restarts them if they unexpectedly die.
-    // The only expected way for an ArchiveWorker to end is explicit cancellation via shutdownWork().
-    private class ArchiveSupervisor implements Runnable {
-        @Override
-        public void run() {
-            try {
-                while (true) {
-                    if(Thread.interrupted()) {
-                        LOG.info("ArchiveSupervisor interrupted, exiting");
-                        return;
-                    }
+    /**
+     * Helper class for encapsulating details of archive worker state handling.
+     */
+    private static class WorkerState {
+        private final ArchiveWorker worker;
+        private final Future<?> future;
 
-                    for(Map.Entry<String, Future> entry : workerFutures.entrySet()) {
-                        if(entry.getValue().isDone()) {
-                            String workUnit = entry.getKey();
-                            LOG.error(String.format("Unexpected archive worker completion for work unit %s; restarting worker", workUnit));
-                            workerFutures.remove(workUnit);
-                            ArchiveWorker worker = workers.remove(workUnit);
-                            startWork(workUnit, worker.meter);
-                        }
-                    }
-                    try {
-                        Thread.sleep(1000);
-                    } catch(InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            } catch(Exception e) {
-                LOG.error("Unhandled exception in ArchiveSupervisor", e);
-                throw e;
-            }
+        public WorkerState(ArchiveWorker worker, Future<?> future) {
+            this.worker = worker;
+            this.future = future;
+        }
+
+        public void requestStop() {
+            worker.requestStop();
+            future.cancel(true);
+        }
+
+        public boolean isTerminated() {
+            return worker.isTerminated();
         }
     }
-
 }

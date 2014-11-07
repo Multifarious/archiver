@@ -4,6 +4,7 @@ import org.joda.time.DateTime;
 import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
 
+import java.nio.charset.Charset;
 import java.util.Date;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -13,6 +14,7 @@ import java.util.regex.Pattern;
  * If the regex fails to match, system time is used.
  */
 public class DateRegexKafkaMessagePartitioner implements KafkaMessagePartitioner {
+    private final static Charset UTF8 = Charset.forName("UTF-8");
 
     private final Pattern dateExtractRegexPattern;
     private final DateTimeFormatter dateTimeFormatter;
@@ -27,8 +29,8 @@ public class DateRegexKafkaMessagePartitioner implements KafkaMessagePartitioner
     }
 
     @Override
-    public KafkaMessagePartitioner.ArchivePartitionData archivePartitionFor(String topic, int partition, byte[] rawMessagePayload) {
-        String message = new String(rawMessagePayload);
+    public ArchivePartitionData archivePartitionFor(String topic, int partition, byte[] rawMessagePayload) {
+        String message = new String(rawMessagePayload, UTF8);
         Date date = new Date();
 
         Matcher matcher = dateExtractRegexPattern.matcher(message);
@@ -46,6 +48,6 @@ public class DateRegexKafkaMessagePartitioner implements KafkaMessagePartitioner
             }
         }
 
-        return new KafkaMessagePartitioner.ArchivePartitionData(message, String.format("%d", partition), date);
+        return new ArchivePartitionData(rawMessagePayload, String.valueOf(partition), date);
     }
 }

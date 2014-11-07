@@ -5,7 +5,7 @@ import java.util.Map;
 
 public class PerTopicDateRegexKafkaMessagePartitioner implements KafkaMessagePartitioner {
 
-    HashMap<String, KafkaMessagePartitioner> partitionerMap = new HashMap<>();
+    final HashMap<String, KafkaMessagePartitioner> partitionerMap = new HashMap<>();
 
     public PerTopicDateRegexKafkaMessagePartitioner(Map<String, DateRegexMessagePartitionerConfig> topicsConfig) {
         for(Map.Entry<String, DateRegexMessagePartitionerConfig> entry : topicsConfig.entrySet()) {
