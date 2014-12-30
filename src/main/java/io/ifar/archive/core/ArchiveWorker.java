@@ -272,11 +272,18 @@ class ArchiveWorker implements Runnable {
             String clientName = "archive_" + partitionState.getTopic() + "_" + partitionState.partition();
 
             long readOffset = 0;
-            if(partitionState.getOffset() == null) {
-                LOG.info("Offset is null for partition {}, getting earliest offset from Kafka", partitionState.getPartition());
+            if(partitionState.getOffset() == null || Long.parseLong(partitionState.getOffset()) == -2) {
+                LOG.info("Offset is null or -2 for partition {}, getting earliest offset from Kafka", partitionState.getPartition());
                 consumer = new SimpleConsumer(leadBroker.host(), leadBroker.port(), simpleConsumerTimeout, simpleConsumerBufferSize, clientName);
                 readOffset = getLastOffset(consumer, partitionState.getTopic(), partitionState.partition(), kafka.api.OffsetRequest.EarliestTime(), clientName);
                 LOG.info("Found earliest offset of {} for partition {}", readOffset, partitionState.getPartition());
+                commit(readOffset);
+            }
+            else if(Long.parseLong(partitionState.getOffset()) == -1) {
+                LOG.info("Offset is -1 for partition {}, getting latest offset from Kafka", partitionState.getPartition());
+                consumer = new SimpleConsumer(leadBroker.host(), leadBroker.port(), simpleConsumerTimeout, simpleConsumerBufferSize, clientName);
+                readOffset = getLastOffset(consumer, partitionState.getTopic(), partitionState.partition(), kafka.api.OffsetRequest.LatestTime(), clientName);
+                LOG.info("Found latest offset of {} for partition {}", readOffset, partitionState.getPartition());
                 commit(readOffset);
             }
             else {
