@@ -28,7 +28,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-class ArchiveWorker implements Runnable {
+class ArchiveWorker {
     final static Logger LOG = LoggerFactory.getLogger(ArchiveWorker.class);
 
     private final static int maxBatchTime = 60000;
@@ -45,6 +45,11 @@ class ArchiveWorker implements Runnable {
 
     private final ZooKeeperClient zkClient;
     private final String zkWorkPath;
+    private final String clientName;
+
+    private SimpleConsumer consumer = null;
+    private Broker leadBroker = null;
+    private long readOffset = 0;
 
     private final List<String> seedBrokers;
     private final List<String> replicaBrokers;
@@ -53,8 +58,6 @@ class ArchiveWorker implements Runnable {
     public final Meter meter;
     private NodeData partitionState;
     private int version;
-
-    private final AtomicBoolean terminated = new AtomicBoolean(false);
 
     public ArchiveWorker(String workUnit, Meter meter, NodeData data, int version,
                          List<String> seedBrokers,
@@ -74,14 +77,11 @@ class ArchiveWorker implements Runnable {
         this.zkClient = zkClient;
         this.zkWorkPath = zkWorkPath;
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
+        this.clientName = "archive_" + partitionState.getTopic() + "_" + partitionState.partition();
     }
 
     public void requestStop() {
         stopFlag.set(true);
-    }
-
-    public boolean isTerminated() {
-        return terminated.get();
     }
 
     private String getNextS3Key(String fileKeyPrefix) throws InterruptedException {
@@ -201,97 +201,86 @@ class ArchiveWorker implements Runnable {
         return offsets[0];
     }
 
-
-    @Override
-    public void run() {
-        // This loop forms what used to be considered "supervisor"
-
-        int count = 0;
-
-        try {
-            while (!stopFlag.get()) {
-                if (++count > 1) {
-                    LOG.info("Restarting archive worker '{}'", workUnit);
-                }
-                try {
-                    runLoop();
-                } catch (Throwable t) {
-                    // let's try to detect "valid" exit via InterruptedException
-                    while (t.getCause() != null) {
-                        t = t.getCause();
-                    }
-                    if ((t instanceof InterruptedException) && stopFlag.get()) {
-                        break;
-                    }
-                    LOG.warn("Archive worker loop interrupted due to uncaught exception: " + t.getMessage(), t);
-                }
-                if (stopFlag.get()) {
-                    break;
-                }
-                // Could make thread wait exponential amount of time, but does not seem necessary here
-                try {
-                    Thread.sleep(1000L);
-                } catch (Throwable t) {
-                }
-            }
-        } finally {
-            terminated.set(true);
+    private boolean init() {
+        if(leadBroker != null && readOffset != 0) {
+            return true;
         }
-    }
-
-    private void runLoop() throws InterruptedException
-    {
-        SimpleConsumer consumer = null;
-        KafkaMessageBatch messageBatch = null;
 
         try {
-            LOG.info("Archive worker thread started for {}, partition {}, starting offset of {}",
+            LOG.info("Archive worker started for {}, partition {}, starting offset of {}",
                     partitionState.getTopic(), partitionState.getPartition(), partitionState.getOffset());
 
             PartitionMetadata metadata = findLeader();
             if (metadata == null) {
-                // Metadata will not be present if nothing is in the partition yet. Retry in-thread for a while
-                // to minimize extraneous log errors.
-                for(int i = 10; i > 0; i--) {
-                    LOG.warn("Can't find metadata for topic {} and partition {}. Retrying in 30 seconds. " +
-                            "Will retry {} more times.", partitionState.getTopic(), partitionState.getPartition(), i);
-                    Thread.sleep(30000);
-                    metadata = findLeader();
-                    if(metadata != null) break;
-                }
+                // Metadata will not be present if nothing is in the partition yet. We will retry later.
                 LOG.warn("Can't find metadata for topic {} and partition {}. Exiting", partitionState.getTopic(), partitionState.getPartition());
-                return;
+                return false;
             }
 
             if (metadata.leader() == null) {
                 LOG.error("Can't find leader for topic {} and partition {}. Exiting", partitionState.getTopic(), partitionState.getPartition());
-                return;
+                return false;
             }
 
-            Broker leadBroker = metadata.leader();
-            String clientName = "archive_" + partitionState.getTopic() + "_" + partitionState.partition();
+            leadBroker = metadata.leader();
 
-            long readOffset = 0;
-            if(partitionState.getOffset() == null || Long.parseLong(partitionState.getOffset()) == -2) {
+            if (partitionState.getOffset() == null || Long.parseLong(partitionState.getOffset()) == -2) {
                 LOG.info("Offset is null or -2 for partition {}, getting earliest offset from Kafka", partitionState.getPartition());
                 consumer = new SimpleConsumer(leadBroker.host(), leadBroker.port(), simpleConsumerTimeout, simpleConsumerBufferSize, clientName);
                 readOffset = getLastOffset(consumer, partitionState.getTopic(), partitionState.partition(), kafka.api.OffsetRequest.EarliestTime(), clientName);
                 LOG.info("Found earliest offset of {} for partition {}", readOffset, partitionState.getPartition());
                 commit(readOffset);
-            }
-            else if(Long.parseLong(partitionState.getOffset()) == -1) {
+            } else if (Long.parseLong(partitionState.getOffset()) == -1) {
                 LOG.info("Offset is -1 for partition {}, getting latest offset from Kafka", partitionState.getPartition());
                 consumer = new SimpleConsumer(leadBroker.host(), leadBroker.port(), simpleConsumerTimeout, simpleConsumerBufferSize, clientName);
                 readOffset = getLastOffset(consumer, partitionState.getTopic(), partitionState.partition(), kafka.api.OffsetRequest.LatestTime(), clientName);
                 LOG.info("Found latest offset of {} for partition {}", readOffset, partitionState.getPartition());
                 commit(readOffset);
-            }
-            else {
+            } else {
                 readOffset = Long.parseLong(partitionState.getOffset());
             }
+        } catch (Exception e) {
+            LOG.warn("Exception while initializing ArchiveWorker", e);
+            return false;
+        }
 
+        return true;
+    }
+
+    private void close() {
+        try {
+            if(consumer != null) consumer.close();
+        } catch (Exception e) {
+            LOG.warn("Problems closing SimpleConsumer", e);
+        }
+    }
+
+    private boolean endIsNigh() {
+        if (stopFlag.get()) {
+            LOG.info("Archive worker {} stop requested. Terminating worker.", workUnit);
+            return true;
+        }
+        if (Thread.interrupted()) {
+            LOG.info("Archive worker {} interrupted. Terminating worker.", workUnit);
+            return true;
+        }
+        return false;
+    }
+
+    public Runnable getArchiveBatchTask() {
+        return new ArchiveBatchWorker();
+    }
+
+    private class ArchiveBatchWorker implements Runnable {
+        @Override
+        public void run() {
+            if(!init()) {
+                return;
+            }
             int numErrors = 0;
-            while (true) {
+            KafkaMessageBatch messageBatch = null;
+
+            try {
                 Map<String, String> messageBatchKeys = new HashMap<>();
                 messageBatch = new TempFileKafkaMessageBatch(s3Configuration, s3Client);
                 long batchStartOffset = readOffset;
@@ -300,9 +289,10 @@ class ArchiveWorker implements Runnable {
                 int batchNumRead = 0;
                 long batchStart = System.currentTimeMillis();
 
-                while((System.currentTimeMillis() - batchStart) < maxBatchTime && (batchNumRead < maxBatchCount)) {
+                while ((System.currentTimeMillis() - batchStart) < maxBatchTime && (batchNumRead < maxBatchCount)) {
                     if (endIsNigh()) {
                         messageBatch.deleteArchiveBatch();
+                        close();
                         return;
                     }
                     if (LOG.isTraceEnabled()) {
@@ -322,7 +312,8 @@ class ArchiveWorker implements Runnable {
                         // Something went wrong!
                         short code = fetchResponse.errorCode(partitionState.getTopic(), partitionState.partition());
                         LOG.error("Error fetching partitionState from broker {}: {}", leadBroker, code);
-                        if (numErrors > 5) throw new RuntimeException("Couldn't fetch partitionState from broker after 5 tries. Exiting.");
+                        if (numErrors > 5)
+                            throw new RuntimeException("Couldn't fetch partitionState from broker after 5 tries. Exiting.");
                         if (code == ErrorMapping.OffsetOutOfRangeCode()) {
                             // We asked for an invalid offset. For simple case ask for the last element to reset
                             readOffset = getLastOffset(consumer, partitionState.getTopic(), partitionState.partition(), kafka.api.OffsetRequest.LatestTime(), clientName);
@@ -379,8 +370,7 @@ class ArchiveWorker implements Runnable {
 
                     if (numRead == 0) {
                         Thread.sleep(1000);
-                    }
-                    else {
+                    } else {
                         meter.mark(numRead);
                         batchNumRead += numRead;
                     }
@@ -420,44 +410,17 @@ class ArchiveWorker implements Runnable {
                         }
                     }
                 }
-            }
-        } catch (Exception e) {
-            // Ok; we failed, let's roll back (note: deletion is idempotent)
-            if (messageBatch != null) {
-                try {
-                    messageBatch.deleteArchiveBatch();
-                } catch (Exception e2) {
-                    LOG.warn("Secondary fail during archive roll back; possibly harmless: {}", e2.getMessage());
+            } catch (Exception e) {
+                // Ok; we failed, let's roll back (note: deletion is idempotent)
+                if (messageBatch != null) {
+                    try {
+                        messageBatch.deleteArchiveBatch();
+                    } catch (Exception e2) {
+                        LOG.warn("Secondary fail during archive roll back; possibly harmless: {}", e2.getMessage());
+                    }
                 }
-            }
-            if (e instanceof InterruptedException) { // cleaner if caller can detect this appropriately
-                throw (InterruptedException) e;
-            }
-            if (e instanceof RuntimeException) {
-                throw (RuntimeException) e;
-            }
-            LOG.error("Unhandled exception in ArchiveWorker thread", e);
-            throw new RuntimeException(e);
-        } finally {
-            if (consumer != null) {
-                try {
-                    consumer.close();
-                } catch (Exception e) {
-                    LOG.warn("Problems closing SimpleConsumer", e);
-                }
+                LOG.error("Unhandled exception in ArchiveWorker thread", e);
             }
         }
-    }
-
-    private boolean endIsNigh() {
-        if (stopFlag.get()) {
-            LOG.info("Archive worker {} stop requested. Terminating worker.", workUnit);
-            return true;
-        }
-        if (Thread.interrupted()) {
-            LOG.info("Archive worker {} interrupted. Terminating worker.", workUnit);
-            return true;
-        }
-        return false;
     }
 }
