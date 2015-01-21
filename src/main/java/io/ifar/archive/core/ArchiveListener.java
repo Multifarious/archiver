@@ -21,7 +21,7 @@ public class ArchiveListener extends SmartListener
 {
     final Logger LOG = LoggerFactory.getLogger(getClass());
 
-    private final ExecutorService executor;
+    private final ScheduledExecutorService executor;
     private final AtomicBoolean stopFlag = new AtomicBoolean(false);
 
     private final AmazonS3Client s3Client;
@@ -36,13 +36,13 @@ public class ArchiveListener extends SmartListener
     private final Map<String, WorkerState> workers = new HashMap<String, WorkerState>();
 
     public ArchiveListener(AmazonS3Client s3Client, S3Configuration s3Configuration, String seedBrokers, String workUnitPath,
-                           KafkaMessagePartitioner kafkaMessagePartitioner) {
+                           KafkaMessagePartitioner kafkaMessagePartitioner, int maxNumParallelWorkers) {
         this.s3Client = s3Client;
         this.s3Configuration = s3Configuration;
         this.seedBrokers = Arrays.asList(seedBrokers.split(","));
         this.zkWorkPath = "/" + workUnitPath + "/";
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
-        this.executor = Executors.newCachedThreadPool();
+        this.executor = Executors.newScheduledThreadPool(maxNumParallelWorkers);
     }
 
     @Override
@@ -76,7 +76,10 @@ public class ArchiveListener extends SmartListener
 
             ArchiveWorker worker = new ArchiveWorker(workUnit, meter, data, version,
                     seedBrokers, s3Client, s3Configuration, zkClient, zkWorkPath, kafkaMessagePartitioner);
-            Future workerFuture = executor.submit(new NamedThreadRunnable(worker, "worker_" + workUnit));
+            //Future workerFuture = executor.submit(new NamedThreadRunnable(worker, "worker_" + workUnit));
+            Future workerFuture = executor.scheduleAtFixedRate(
+                    new NamedThreadRunnable(worker.getArchiveBatchTask(), "worker_" + workUnit),
+                    0, 1, TimeUnit.MINUTES);
             synchronized (workers) {
                 workers.put(workUnit, new WorkerState(worker, workerFuture));
             }
@@ -145,7 +148,7 @@ public class ArchiveListener extends SmartListener
         }
 
         public boolean isTerminated() {
-            return worker.isTerminated();
+            return future.isDone();
         }
     }
 }

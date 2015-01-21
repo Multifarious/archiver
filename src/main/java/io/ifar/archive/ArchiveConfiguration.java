@@ -36,6 +36,9 @@ public class ArchiveConfiguration extends Configuration {
     @JsonProperty
     private Map<String, DateRegexMessagePartitionerConfig> kafkaMessagePartitionerConfig;
 
+    @JsonProperty
+    int maxNumParallelWorkers = 16;
+
     public String getServiceName() {
         return serviceName;
     }
@@ -56,5 +59,9 @@ public class ArchiveConfiguration extends Configuration {
 
     public Map<String, DateRegexMessagePartitionerConfig> getKafkaMessagePartitionerConfig() {
         return kafkaMessagePartitionerConfig;
+    }
+
+    public int getMaxNumParallelWorkers() {
+        return maxNumParallelWorkers;
     }
 }
