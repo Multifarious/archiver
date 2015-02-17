@@ -5,12 +5,12 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.boundary.ordasity.SmartListener;
+import com.codahale.metrics.Meter;
+import com.fasterxml.mama.SmartListener;
 import io.dropwizard.lifecycle.Managed;
 import io.ifar.archive.ArchiveApplication;
 import io.ifar.archive.S3Configuration;
 import com.twitter.common.zookeeper.ZooKeeperClient;
-import com.yammer.metrics.scala.Meter;
 import io.ifar.archive.core.partitioner.KafkaMessagePartitioner;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;

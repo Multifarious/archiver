@@ -5,9 +5,9 @@ import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.internal.StaticCredentialsProvider;
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.boundary.ordasity.Cluster;
-import com.boundary.ordasity.ClusterConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.mama.Cluster;
+import com.fasterxml.mama.ClusterConfig;
 import io.ifar.archive.cli.AddPartitionCommand;
 import io.ifar.archive.cli.ChangePartitionOffsetCommand;
 import io.ifar.archive.cli.DeletePartitionCommand;
@@ -72,12 +72,12 @@ public class ArchiveApplication extends Application<ArchiveConfiguration> {
         environment.lifecycle().manage(listener);
 
         ClusterConfig clusterConfig = new ClusterConfig()
-                .setHosts(configuration.getZookeeperServerstring())
+                .hosts(configuration.getZookeeperServerstring())
                 .useSmartBalancing(true)
-                .setRebalanceInterval(60 * 5)
-                .setDrainTime(1)
-                .setWorkUnitName(workUnitPath)
-                .setWorkUnitShortName("partition");
+                .autoRebalanceInterval(60 * 5)
+                .drainTime(1)
+                .workUnitName(workUnitPath)
+                .workUnitShortName("partition");
         Cluster ordasityCluster = new Cluster(configuration.getServiceName(), listener, clusterConfig);
 
         ArchiveCluster cluster = new ArchiveCluster(ordasityCluster);

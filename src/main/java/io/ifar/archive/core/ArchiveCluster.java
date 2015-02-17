@@ -1,6 +1,6 @@
 package io.ifar.archive.core;
 
-import com.boundary.ordasity.Cluster;
+import com.fasterxml.mama.Cluster;
 import io.dropwizard.lifecycle.Managed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
