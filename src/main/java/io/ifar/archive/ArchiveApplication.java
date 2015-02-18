@@ -78,7 +78,8 @@ public class ArchiveApplication extends Application<ArchiveConfiguration> {
                 .drainTime(1)
                 .workUnitName(workUnitPath)
                 .workUnitShortName("partition");
-        Cluster ordasityCluster = new Cluster(configuration.getServiceName(), listener, clusterConfig);
+        Cluster ordasityCluster = new Cluster(configuration.getServiceName(), listener, clusterConfig,
+                                              environment.metrics());
 
         ArchiveCluster cluster = new ArchiveCluster(ordasityCluster);
         environment.lifecycle().manage(cluster);
