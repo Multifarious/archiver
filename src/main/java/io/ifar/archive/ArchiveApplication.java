@@ -68,7 +68,8 @@ public class ArchiveApplication extends Application<ArchiveConfiguration> {
         }
 
         ArchiveListener listener = new ArchiveListener(s3Client, configuration.getS3Configuration(),
-                configuration.getSeedBrokers(), workUnitPath, kafkaMessagePartitioner, configuration.getMaxNumParallelWorkers());
+                configuration.getSeedBrokers(), workUnitPath, kafkaMessagePartitioner, configuration.getMaxNumParallelWorkers(),
+                environment.metrics());
         environment.lifecycle().manage(listener);
 
         ClusterConfig clusterConfig = new ClusterConfig()

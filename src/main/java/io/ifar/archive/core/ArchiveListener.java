@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.codahale.metrics.Meter;
+import com.codahale.metrics.MetricRegistry;
 import com.fasterxml.mama.SmartListener;
 import io.dropwizard.lifecycle.Managed;
 import io.ifar.archive.ArchiveApplication;
@@ -30,19 +31,24 @@ public class ArchiveListener extends SmartListener
 
     private final List<String> seedBrokers;
     private final String zkWorkPath;
+    private final MetricRegistry metrics;
+    private final IntegerGauge numWorkUnitsGauge;
 
     private ZooKeeperClient zkClient;
 
     private final Map<String, WorkerState> workers = new HashMap<String, WorkerState>();
 
     public ArchiveListener(AmazonS3Client s3Client, S3Configuration s3Configuration, String seedBrokers, String workUnitPath,
-                           KafkaMessagePartitioner kafkaMessagePartitioner, int maxNumParallelWorkers) {
+                           KafkaMessagePartitioner kafkaMessagePartitioner, int maxNumParallelWorkers, MetricRegistry metrics) {
         this.s3Client = s3Client;
         this.s3Configuration = s3Configuration;
         this.seedBrokers = Arrays.asList(seedBrokers.split(","));
         this.zkWorkPath = "/" + workUnitPath + "/";
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
         this.executor = Executors.newScheduledThreadPool(maxNumParallelWorkers);
+        this.metrics = metrics;
+
+        numWorkUnitsGauge = metrics.register("archiveListener-workUnits", new IntegerGauge());
     }
 
     @Override
@@ -83,6 +89,7 @@ public class ArchiveListener extends SmartListener
             synchronized (workers) {
                 workers.put(workUnit, new WorkerState(worker, workerFuture));
             }
+            numWorkUnitsGauge.set(workers.size());
         } catch (Exception e) {
             LOG.warn("startWork() failed", e);
         }
@@ -128,6 +135,7 @@ public class ArchiveListener extends SmartListener
                 break;
             }
         }
+        numWorkUnitsGauge.set(workers.size());
     }
 
     /**

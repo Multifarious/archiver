@@ -68,7 +68,7 @@
         <dependency>
             <groupId>com.fasterxml.mama</groupId>
             <artifactId>macro-manager</artifactId>
-            <version>0.6.0</version>
+            <version>0.6.1-SNAPSHOT</version>
             <exclusions>
                 <exclusion>
                     <groupId>com.fasterxml.jackson.core</groupId>
@@ -91,6 +91,12 @@
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk</artifactId>
             <version>1.9.19</version>
+        </dependency>
+
+        <dependency>
+            <groupId>io.ifar.datadog.metrics</groupId>
+            <artifactId>dropwizard-metrics-datadog</artifactId>
+            <version>0</version>
         </dependency>
 
         <dependency>
