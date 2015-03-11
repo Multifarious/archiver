@@ -7,7 +7,6 @@ import com.codahale.metrics.Meter;
 import com.google.common.collect.Lists;
 import com.twitter.common.zookeeper.ZooKeeperClient;
 import io.ifar.archive.ArchiveApplication;
-import io.ifar.archive.S3Configuration;
 import io.ifar.archive.core.partitioner.ArchivePartitionData;
 import io.ifar.archive.core.partitioner.KafkaMessagePartitioner;
 import kafka.api.FetchRequestBuilder;
@@ -26,19 +25,18 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 class ArchiveWorker {
     final static Logger LOG = LoggerFactory.getLogger(ArchiveWorker.class);
 
-    private final static int maxBatchTime = 60000;
     private final static int maxBatchCount = 10000;
     private final static int fetchSize = 1000000;
     private final static int simpleConsumerTimeout = 10000;
     private final static int simpleConsumerBufferSize = 1024000;
 
     private final AmazonS3Client s3Client;
-    private final S3Configuration s3Configuration;
     private final KafkaMessagePartitioner kafkaMessagePartitioner;
 
     private final AtomicBoolean stopFlag = new AtomicBoolean(false);
@@ -46,6 +44,7 @@ class ArchiveWorker {
     private final ZooKeeperClient zkClient;
     private final String zkWorkPath;
     private final String clientName;
+    private final TopicConfiguration topicConfiguration;
 
     private SimpleConsumer consumer = null;
     private Broker leadBroker = null;
@@ -61,10 +60,11 @@ class ArchiveWorker {
 
     public ArchiveWorker(String workUnit, Meter meter, NodeData data, int version,
                          List<String> seedBrokers,
-                         AmazonS3Client s3Client, S3Configuration s3Configuration,
+                         AmazonS3Client s3Client,
                          ZooKeeperClient zkClient,
                          String zkWorkPath,
-                         KafkaMessagePartitioner kafkaMessagePartitioner)
+                         KafkaMessagePartitioner kafkaMessagePartitioner,
+                         TopicConfiguration topicConfiguration)
     {
         this.seedBrokers = seedBrokers;
         replicaBrokers = Lists.newArrayList(seedBrokers);
@@ -73,10 +73,10 @@ class ArchiveWorker {
         this.partitionState = data;
         this.version = version;
         this.s3Client = s3Client;
-        this.s3Configuration = s3Configuration;
         this.zkClient = zkClient;
         this.zkWorkPath = zkWorkPath;
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
+        this.topicConfiguration = topicConfiguration;
         this.clientName = "archive_" + partitionState.getTopic() + "_" + partitionState.partition();
     }
 
@@ -86,7 +86,7 @@ class ArchiveWorker {
 
     private String getNextS3Key(String fileKeyPrefix) throws InterruptedException {
         try {
-            ObjectListing objectListing = s3Client.listObjects(s3Configuration.getBucket(), fileKeyPrefix);
+            ObjectListing objectListing = s3Client.listObjects(topicConfiguration.getBucket(), fileKeyPrefix);
             List<S3ObjectSummary> os = objectListing.getObjectSummaries();
             int filenum = 0;
             if(os.size() > 0) {
@@ -277,23 +277,33 @@ class ArchiveWorker {
             if(!init()) {
                 return;
             }
+
+            boolean consumedEverything = false;
+            while(!consumedEverything) {
+                consumedEverything = readAndWriteBatch();
+            }
+        }
+
+        private boolean readAndWriteBatch() {
             int numErrors = 0;
             KafkaMessageBatch messageBatch = null;
+            boolean consumedEverything = false;
 
             try {
                 Map<String, String> messageBatchKeys = new HashMap<>();
-                messageBatch = new TempFileKafkaMessageBatch(s3Configuration, s3Client);
+                messageBatch = new TempFileKafkaMessageBatch(topicConfiguration.getBucket(), s3Client);
                 long batchStartOffset = readOffset;
                 LOG.debug(String.format("Starting batch for worker %s at offset %d", workUnit, readOffset));
-                // we want to write out and commit a batch approximately every minute (or every n records)
+                // we want to write out and commit a batch approximately every minute (or every n records),
+                // or however the topic is specifically configured
                 int batchNumRead = 0;
                 long batchStart = System.currentTimeMillis();
 
-                while ((System.currentTimeMillis() - batchStart) < maxBatchTime && (batchNumRead < maxBatchCount)) {
+                while (batchNumRead < maxBatchCount && !consumedEverything) {
                     if (endIsNigh()) {
                         messageBatch.deleteArchiveBatch();
                         close();
-                        return;
+                        return true;
                     }
                     if (LOG.isTraceEnabled()) {
                         LOG.trace(String.format("%s:\t%d\t%d", workUnit, (System.currentTimeMillis() - batchStart), batchNumRead));
@@ -336,7 +346,7 @@ class ArchiveWorker {
                     for (MessageAndOffset messageAndOffset : fetchResponse.messageSet(topic, partition)) {
                         if (endIsNigh()) {
                             messageBatch.deleteArchiveBatch();
-                            return;
+                            return true;
                         }
                         long currentOffset = messageAndOffset.offset();
                         if (currentOffset < readOffset) {
@@ -355,9 +365,24 @@ class ArchiveWorker {
                         String archivePartition = apd.archivePartition;
                         Date dt = apd.archiveTime;
 
+                        String formatStr = "%s/%s/%d-%s/%tY/%tm/";
+                        switch(topicConfiguration.getMaxBatchDuration().getUnit()) {
+                            case DAYS: formatStr += "%td/%s_%tY-%tm-%td"; break;
+                            case HOURS: formatStr += "%td/%tH/%s_%tY-%tm-%tdT%tH"; break;
+                            default: formatStr += "%td/%tH/%s_%tY-%tm-%tdT%tH:%d"; break;
+                        }
+
+                        // write to a smaller number of files than ~1/minute if the duration is something like 10 minutes
+                        long truncatedMinutes =
+                                (dt.getMinutes() / topicConfiguration.getMaxBatchDuration().getQuantity()) *
+                                        topicConfiguration.getMaxBatchDuration().getQuantity();
+
                         String fileKeyPrefix = String.format(
-                                "%s/%s/minute/%tY/%tm/%td/%tH/%s_%tY-%tm-%tdT%tH:%tM",
-                                topic, archivePartition, dt, dt, dt, dt, topic, dt, dt, dt, dt, dt);
+                                formatStr,
+                                topic, archivePartition,
+                                topicConfiguration.getMaxBatchDuration().getQuantity(),
+                                topicConfiguration.getMaxBatchDuration().getUnit().toString(),
+                                dt, dt, dt, dt, topic, dt, dt, dt, dt, truncatedMinutes);
                         String fileKey = messageBatchKeys.get(fileKeyPrefix);
                         if (fileKey == null) {
                             fileKey = getNextS3Key(fileKeyPrefix);
@@ -369,7 +394,7 @@ class ArchiveWorker {
                     }
 
                     if (numRead == 0) {
-                        Thread.sleep(1000);
+                        consumedEverything = true;
                     } else {
                         meter.mark(numRead);
                         batchNumRead += numRead;
@@ -387,13 +412,13 @@ class ArchiveWorker {
                         if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
                         }
-                        return;
+                        return true;
                     } catch (KeeperException.BadVersionException e) {
                         LOG.warn("Zookeeper version out of sync for worker {}. Terminating worker thread.", workUnit);
                         if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
                         }
-                        return;
+                        return true;
                     } catch (Exception e) {
                         readOffset = batchStartOffset;
                         try {
@@ -419,8 +444,11 @@ class ArchiveWorker {
                         LOG.warn("Secondary fail during archive roll back; possibly harmless: {}", e2.getMessage());
                     }
                 }
-                LOG.error("Unhandled exception in ArchiveWorker thread", e);
+                LOG.error("Unhandled exception in ArchiveWorker thread, successfully rolled back batch", e);
+                return true;
             }
+
+            return consumedEverything;
         }
     }
 }

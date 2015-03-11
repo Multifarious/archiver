@@ -24,11 +24,11 @@ public class TempFileKafkaMessageBatch implements KafkaMessageBatch {
      */
     private Set<String> currentBatchFilesWritten = new HashSet<>();
 
-    private S3Configuration s3Configuration;
+    private String bucket;
     private AmazonS3Client s3Client;
 
-    public TempFileKafkaMessageBatch(S3Configuration s3Configuration, AmazonS3Client s3Client) {
-        this.s3Configuration = s3Configuration;
+    public TempFileKafkaMessageBatch(String bucket, AmazonS3Client s3Client) {
+        this.bucket = bucket;
         this.s3Client = s3Client;
     }
 
@@ -64,7 +64,7 @@ public class TempFileKafkaMessageBatch implements KafkaMessageBatch {
                 if (LOG.isDebugEnabled()) { // just because file.length() causes I/O access
                     LOG.debug("Writing temp file {} ({} bytes) to {}", tempFile.getName(), tempFile.length(), key);
                 }
-                PutObjectRequest request = new PutObjectRequest(s3Configuration.getBucket(), key, tempFile);
+                PutObjectRequest request = new PutObjectRequest(bucket, key, tempFile);
                 // add first, so that set contains anything that may have been uploaded
                 currentBatchFilesWritten.add(key);
                 s3Client.putObject(request);
@@ -110,7 +110,7 @@ public class TempFileKafkaMessageBatch implements KafkaMessageBatch {
             String fileKey = s3it.next();
             it.remove();
             try {
-                DeleteObjectRequest request = new DeleteObjectRequest(s3Configuration.getBucket(), fileKey);
+                DeleteObjectRequest request = new DeleteObjectRequest(bucket, fileKey);
                 s3Client.deleteObject(request); // will succeed if object does not exist
             } catch (AbortedException e) {
                 LOG.info("AbortedException thrown while deleting S3 files; throwing InterruptedException", e);
