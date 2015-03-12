@@ -87,7 +87,13 @@ class ArchiveWorker {
     private String getNextS3Key(String fileKeyPrefix) throws InterruptedException {
         try {
             ObjectListing objectListing = s3Client.listObjects(topicConfiguration.getBucket(), fileKeyPrefix);
-            List<S3ObjectSummary> os = objectListing.getObjectSummaries();
+            List<S3ObjectSummary> os = new ArrayList<>();
+            os.addAll(objectListing.getObjectSummaries());
+            // number of objects should be small for the prefix, but we'll check for more just in case
+            while(objectListing.isTruncated()) {
+                objectListing = s3Client.listNextBatchOfObjects(objectListing);
+                os.addAll(objectListing.getObjectSummaries());
+            }
             int filenum = 0;
             if(os.size() > 0) {
                 String lastKey = os.get(os.size() - 1).getKey();

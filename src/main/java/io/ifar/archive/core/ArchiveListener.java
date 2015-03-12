@@ -85,7 +85,7 @@ public class ArchiveListener extends SmartListener
             TopicConfiguration topicConf = topicConfiguration.get(data.getTopic());
             if(topicConf == null) {
                 if(defaultBucket == null) {
-                    throw new RuntimeException("No topic configuration found for: " + data.getTopic() +
+                    throw new IllegalStateException("No topic configuration found for: " + data.getTopic() +
                             " and default S3 bucket not configured.");
                 } else {
                     LOG.info("Using default topic configuration for: " + data.getTopic());
