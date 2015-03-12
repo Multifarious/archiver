@@ -27,4 +27,5 @@ kafkaMessagePartitionerConfig:
 s3Configuration:
   accessKeyId: foobar
   secretAccessKey: foobar
-  bucket: my-archive-bucket-name
+
+defaultBucket: my-archive-bucket-name

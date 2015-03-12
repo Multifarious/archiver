@@ -2,11 +2,13 @@ package io.ifar.archive;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.dropwizard.Configuration;
+import io.ifar.archive.core.TopicConfiguration;
 import io.ifar.archive.core.partitioner.DateRegexMessagePartitionerConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.validation.constraints.NotNull;
+import java.util.HashMap;
 import java.util.Map;
 
 public class ArchiveConfiguration extends Configuration {
@@ -31,6 +33,13 @@ public class ArchiveConfiguration extends Configuration {
     S3Configuration s3Configuration = new S3Configuration();
 
     @JsonProperty
+    String defaultBucket;
+
+    @JsonProperty
+    @NotNull
+    Map<String, TopicConfiguration> topicConfiguration = new HashMap<>();
+
+    @JsonProperty
     private String customKafkaMessagePartitionerClass;
 
     @JsonProperty
@@ -45,6 +54,14 @@ public class ArchiveConfiguration extends Configuration {
 
     public S3Configuration getS3Configuration() {
         return s3Configuration;
+    }
+
+    public String getDefaultBucket() {
+        return defaultBucket;
+    }
+
+    public Map<String, TopicConfiguration> getTopicConfiguration() {
+        return topicConfiguration;
     }
 
     public String getZkRoot() { return zkRoot; }
