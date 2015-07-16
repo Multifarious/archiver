@@ -9,6 +9,10 @@
     <version>2-SNAPSHOT</version>
     <packaging>jar</packaging>
 
+    <name>Kafka Archiver</name>
+    <description>Writes Kafka messages to S3, organized by timestamp.</description>
+    <url>https://github.com/Multifarious/archiver</url>
+
     <developers>
         <developer>
             <organization>Multifarious, Inc.</organization>
@@ -281,7 +285,30 @@
                     </dependency>
                 </dependencies>
             </plugin>
-            <!-- Bake DW uberjar. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -330,7 +357,6 @@
             </plugin>
         </plugins>
     </build>
-
 
     <profiles>
         <profile>
