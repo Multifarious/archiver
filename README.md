@@ -41,5 +41,5 @@ Releases are available on Maven Central.
 
 ## License
 
-The license for `kaffa-archiver` is [BSD 2-clause](http://opensource.org/licenses/BSD-2-Clause).  This information is also
+The license for `kafka-archiver` is [BSD 2-clause](http://opensource.org/licenses/BSD-2-Clause).  This information is also
 present in the `LICENSE` file and in `pom.xml`.
