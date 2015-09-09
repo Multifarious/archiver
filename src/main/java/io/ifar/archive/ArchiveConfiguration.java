@@ -33,6 +33,10 @@ public class ArchiveConfiguration extends Configuration {
     S3Configuration s3Configuration = new S3Configuration();
 
     @JsonProperty
+    @NotNull
+    ErrorLimitConfiguration errorLimitConfiguration = new ErrorLimitConfiguration();
+
+    @JsonProperty
     String defaultBucket;
 
     @JsonProperty
@@ -54,6 +58,10 @@ public class ArchiveConfiguration extends Configuration {
 
     public S3Configuration getS3Configuration() {
         return s3Configuration;
+    }
+
+    public ErrorLimitConfiguration getErrorLimitConfiguration() {
+        return errorLimitConfiguration;
     }
 
     public String getDefaultBucket() {

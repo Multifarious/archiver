@@ -25,7 +25,6 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 class ArchiveWorker {
@@ -42,6 +41,7 @@ class ArchiveWorker {
     private final AtomicBoolean stopFlag = new AtomicBoolean(false);
 
     private final ZooKeeperClient zkClient;
+    private final ArchiveListener archiveListener;
     private final String zkWorkPath;
     private final String clientName;
     private final TopicConfiguration topicConfiguration;
@@ -64,7 +64,8 @@ class ArchiveWorker {
                          ZooKeeperClient zkClient,
                          String zkWorkPath,
                          KafkaMessagePartitioner kafkaMessagePartitioner,
-                         TopicConfiguration topicConfiguration)
+                         TopicConfiguration topicConfiguration,
+                         ArchiveListener archiveListener)
     {
         this.seedBrokers = seedBrokers;
         replicaBrokers = Lists.newArrayList(seedBrokers);
@@ -78,6 +79,7 @@ class ArchiveWorker {
         this.kafkaMessagePartitioner = kafkaMessagePartitioner;
         this.topicConfiguration = topicConfiguration;
         this.clientName = "archive_" + partitionState.getTopic() + "_" + partitionState.partition();
+        this.archiveListener = archiveListener;
     }
 
     public void requestStop() {
@@ -418,12 +420,14 @@ class ArchiveWorker {
                         if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
                         }
+                        archiveListener.batchComplete(workUnit, true);
                         return true;
                     } catch (KeeperException.BadVersionException e) {
                         LOG.warn("Zookeeper version out of sync for worker {}. Terminating worker thread.", workUnit);
                         if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
                         }
+                        archiveListener.batchComplete(workUnit, true);
                         return true;
                     } catch (Exception e) {
                         readOffset = batchStartOffset;
@@ -440,6 +444,7 @@ class ArchiveWorker {
                             throw new RuntimeException(re);
                         }
                     }
+                    archiveListener.batchComplete(workUnit, false);
                 }
             } catch (Exception e) {
                 // Ok; we failed, let's roll back (note: deletion is idempotent)
@@ -451,9 +456,9 @@ class ArchiveWorker {
                     }
                 }
                 LOG.error("Unhandled exception in ArchiveWorker thread, successfully rolled back batch", e);
+                archiveListener.batchComplete(workUnit, true);
                 return true;
             }
-
             return consumedEverything;
         }
     }

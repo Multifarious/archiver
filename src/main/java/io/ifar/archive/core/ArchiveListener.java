@@ -3,6 +3,7 @@ package io.ifar.archive.core;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.codahale.metrics.Meter;
@@ -11,6 +12,7 @@ import com.fasterxml.mama.SmartListener;
 import io.dropwizard.lifecycle.Managed;
 import io.ifar.archive.ArchiveApplication;
 import com.twitter.common.zookeeper.ZooKeeperClient;
+import io.ifar.archive.ErrorLimitConfiguration;
 import io.ifar.archive.core.partitioner.KafkaMessagePartitioner;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
@@ -32,15 +34,21 @@ public class ArchiveListener extends SmartListener
     private final MetricRegistry metrics;
     private final IntegerGauge numWorkUnitsGauge;
     private final Map<String, TopicConfiguration> topicConfiguration;
+    private final ErrorLimitConfiguration errorLimitConfiguration;
     private final String defaultBucket;
 
     private ZooKeeperClient zkClient;
+    private ArchiveCluster archiveCluster;
+
+    private AtomicInteger failedBatches = new AtomicInteger(0);
+    private AtomicInteger successfulBatches = new AtomicInteger(0);
 
     private final Map<String, WorkerState> workers = new HashMap<String, WorkerState>();
 
     public ArchiveListener(AmazonS3Client s3Client, String seedBrokers, String workUnitPath,
                            KafkaMessagePartitioner kafkaMessagePartitioner, int maxNumParallelWorkers, MetricRegistry metrics,
-                           Map<String, TopicConfiguration> topicConfiguration, String defaultBucket) {
+                           Map<String, TopicConfiguration> topicConfiguration, ErrorLimitConfiguration errorLimitConfiguration,
+                           String defaultBucket) {
         this.s3Client = s3Client;
         this.seedBrokers = Arrays.asList(seedBrokers.split(","));
         this.zkWorkPath = "/" + workUnitPath + "/";
@@ -48,9 +56,39 @@ public class ArchiveListener extends SmartListener
         this.executor = Executors.newScheduledThreadPool(maxNumParallelWorkers);
         this.metrics = metrics;
         this.topicConfiguration = topicConfiguration;
+        this.errorLimitConfiguration = errorLimitConfiguration;
         this.defaultBucket = defaultBucket;
 
         numWorkUnitsGauge = metrics.register("archiveListener-workUnits", new IntegerGauge());
+    }
+
+    public void setCluster(ArchiveCluster archiveCluster) {
+        this.archiveCluster = archiveCluster;
+    }
+
+    public void batchComplete(String workUnit, boolean batchFailed) {
+        if (stopFlag.get())
+            return;
+        if (batchFailed) {
+            int errors = failedBatches.getAndIncrement()+1;
+            LOG.info("Encountered error in archive worker {} (" + errors + " error(s) total)", workUnit);
+            int successful = successfulBatches.get();
+
+            if (errors >= errorLimitConfiguration.getTriesBeforeEnableErrorLimit()) {
+
+                double limit = errorLimitConfiguration.getErrorLimitPercent() / 100.0;
+
+                if ( (1.0*errors) / (1.0*successful) >= limit ) {
+                    LOG.error("Error limit reached!");
+                    failedBatches.set(0);
+                    successfulBatches.set(0);
+                    archiveCluster.stopAndWait(errorLimitConfiguration.getSecondsToWaitOnReachErrorLimit(), stopFlag);
+                }
+
+            }
+
+        } else
+            successfulBatches.getAndIncrement();
     }
 
     @Override
@@ -96,7 +134,7 @@ public class ArchiveListener extends SmartListener
             }
 
             ArchiveWorker worker = new ArchiveWorker(workUnit, meter, data, version,
-                    seedBrokers, s3Client, zkClient, zkWorkPath, kafkaMessagePartitioner, topicConf);
+                    seedBrokers, s3Client, zkClient, zkWorkPath, kafkaMessagePartitioner, topicConf, this);
             Future workerFuture = executor.scheduleAtFixedRate(
                     new NamedThreadRunnable(worker.getArchiveBatchTask(), "worker_" + workUnit),
                     0, topicConf.getMaxBatchDuration().getQuantity(), topicConf.getMaxBatchDuration().getUnit());

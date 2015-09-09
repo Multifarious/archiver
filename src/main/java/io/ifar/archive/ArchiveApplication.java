@@ -69,7 +69,8 @@ public class ArchiveApplication extends Application<ArchiveConfiguration> {
 
         ArchiveListener listener = new ArchiveListener(s3Client,
                 configuration.getSeedBrokers(), workUnitPath, kafkaMessagePartitioner, configuration.getMaxNumParallelWorkers(),
-                environment.metrics(), configuration.getTopicConfiguration(), configuration.getDefaultBucket());
+                environment.metrics(), configuration.getTopicConfiguration(), configuration.getErrorLimitConfiguration(),
+                configuration.getDefaultBucket());
         environment.lifecycle().manage(listener);
 
         ClusterConfig clusterConfig = new ClusterConfig()
@@ -83,6 +84,7 @@ public class ArchiveApplication extends Application<ArchiveConfiguration> {
                                               environment.metrics());
 
         ArchiveCluster cluster = new ArchiveCluster(ordasityCluster);
+        listener.setCluster(cluster);
         environment.lifecycle().manage(cluster);
 
         environment.jersey().disable();
