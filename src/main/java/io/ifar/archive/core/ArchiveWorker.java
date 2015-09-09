@@ -444,7 +444,7 @@ class ArchiveWorker {
                             throw new RuntimeException(re);
                         }
                     }
-                    archiveListener.batchSuccess(workUnit);
+                    archiveListener.batchSuccess();
                 }
             } catch (Exception e) {
                 // Ok; we failed, let's roll back (note: deletion is idempotent)

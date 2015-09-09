@@ -3,13 +3,13 @@ package io.ifar.archive.core;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import com.fasterxml.mama.SmartListener;
 import io.dropwizard.lifecycle.Managed;
+import io.dropwizard.util.Duration;
 import io.ifar.archive.ArchiveApplication;
 import com.twitter.common.zookeeper.ZooKeeperClient;
 import io.ifar.archive.ErrorLimitConfiguration;
@@ -31,8 +31,10 @@ public class ArchiveListener extends SmartListener
 
     private final List<String> seedBrokers;
     private final String zkWorkPath;
+
     private final MetricRegistry metrics;
     private final IntegerGauge numWorkUnitsGauge;
+
     private final Map<String, TopicConfiguration> topicConfiguration;
     private final ErrorLimitConfiguration errorLimitConfiguration;
     private final String defaultBucket;
@@ -40,8 +42,7 @@ public class ArchiveListener extends SmartListener
     private ZooKeeperClient zkClient;
     private ArchiveCluster archiveCluster;
 
-    private AtomicInteger failedBatches = new AtomicInteger(0);
-    private AtomicInteger successfulBatches = new AtomicInteger(0);
+    private SlidingTimeWindowFailPctGauge failPctGauge;
 
     private final Map<String, WorkerState> workers = new HashMap<String, WorkerState>();
 
@@ -60,6 +61,10 @@ public class ArchiveListener extends SmartListener
         this.defaultBucket = defaultBucket;
 
         numWorkUnitsGauge = metrics.register("archiveListener-workUnits", new IntegerGauge());
+
+        Duration errorWindow = errorLimitConfiguration.getlengthOfErrorCheckingWindow();
+        failPctGauge = metrics.register("archiveListener-failPctGauge", new SlidingTimeWindowFailPctGauge(
+                errorWindow.getQuantity(), errorWindow.getUnit()));
     }
 
     public void setCluster(ArchiveCluster archiveCluster) {
@@ -68,29 +73,26 @@ public class ArchiveListener extends SmartListener
 
     public void batchFailure(String workUnit) {
         if (!stopFlag.get()) {
-            int errors = failedBatches.getAndIncrement()+1;
+            int errors = failPctGauge.getAndIncrementFailed()+1;
             LOG.warn("Encountered error in archive worker {} ({} error(s) total)", workUnit, errors);
-            int successful = successfulBatches.get();
-
             if (errors >= errorLimitConfiguration.getTriesBeforeEnableErrorLimit()) {
-
                 double limit = errorLimitConfiguration.getErrorLimitPercent() / 100.0;
-
-                if ( (1.0*errors) / (1.0*successful) >= limit ) {
-                    LOG.error("Error limit reached!");
-                    failedBatches.set(0);
-                    successfulBatches.set(0);
-                    archiveCluster.stopAndWait(errorLimitConfiguration.getSecondsToWaitOnReachErrorLimit(), stopFlag);
+                double ratio = failPctGauge.getRatio().getValue();
+                if ( ratio >= limit ) {
+                    Duration waitTime = errorLimitConfiguration.getlengthToWaitOnReachErrorLimit();
+                    LOG.error("Error limit reached (current error percentage: {}%), stopping work claims for {}",
+                            String.format("%.2f%n", ratio * 100.0), waitTime.toString());
+                    failPctGauge.reset();
+                    archiveCluster.stopAndWait(waitTime.toMilliseconds(), stopFlag);
                 }
 
             }
-
         }
     }
 
-    public void batchSuccess(String workUnit) {
+    public void batchSuccess() {
         if (!stopFlag.get())
-            successfulBatches.getAndIncrement();
+            failPctGauge.getAndIncrementSucceeded();
     }
 
     @Override

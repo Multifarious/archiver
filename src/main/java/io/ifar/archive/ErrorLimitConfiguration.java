@@ -1,6 +1,7 @@
 package io.ifar.archive;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.dropwizard.util.Duration;
 
 public class ErrorLimitConfiguration {
 
@@ -11,7 +12,10 @@ public class ErrorLimitConfiguration {
     int triesBeforeEnableErrorLimit = 10;
 
     @JsonProperty
-    int secondsToWaitOnReachErrorLimit = 10 * 60;
+    Duration lengthToWaitOnReachErrorLimit = Duration.minutes(10);
+
+    @JsonProperty
+    Duration lengthOfErrorCheckingWindow = lengthToWaitOnReachErrorLimit;
 
     public double getErrorLimitPercent() {
         return errorLimitPercent;
@@ -21,8 +25,12 @@ public class ErrorLimitConfiguration {
         return triesBeforeEnableErrorLimit;
     }
 
-    public int getSecondsToWaitOnReachErrorLimit() {
-        return secondsToWaitOnReachErrorLimit;
+    public Duration getlengthToWaitOnReachErrorLimit() {
+        return lengthToWaitOnReachErrorLimit;
+    }
+
+    public Duration getlengthOfErrorCheckingWindow() {
+        return lengthOfErrorCheckingWindow;
     }
 
 }
