@@ -5,7 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 public class ErrorLimitConfiguration {
 
     @JsonProperty
-    double errorLimitPercent = 1.0;
+    double errorLimitPercent = 5.0;
 
     @JsonProperty
     int triesBeforeEnableErrorLimit = 10;

@@ -420,14 +420,14 @@ class ArchiveWorker {
                         if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
                         }
-                        archiveListener.batchComplete(workUnit, true);
+                        archiveListener.batchFailure(workUnit);
                         return true;
                     } catch (KeeperException.BadVersionException e) {
                         LOG.warn("Zookeeper version out of sync for worker {}. Terminating worker thread.", workUnit);
                         if (messageBatch != null) {
                             messageBatch.deleteArchiveBatch();
                         }
-                        archiveListener.batchComplete(workUnit, true);
+                        archiveListener.batchFailure(workUnit);
                         return true;
                     } catch (Exception e) {
                         readOffset = batchStartOffset;
@@ -444,7 +444,7 @@ class ArchiveWorker {
                             throw new RuntimeException(re);
                         }
                     }
-                    archiveListener.batchComplete(workUnit, false);
+                    archiveListener.batchSuccess(workUnit);
                 }
             } catch (Exception e) {
                 // Ok; we failed, let's roll back (note: deletion is idempotent)
@@ -456,7 +456,7 @@ class ArchiveWorker {
                     }
                 }
                 LOG.error("Unhandled exception in ArchiveWorker thread, successfully rolled back batch", e);
-                archiveListener.batchComplete(workUnit, true);
+                archiveListener.batchFailure(workUnit);
                 return true;
             }
             return consumedEverything;

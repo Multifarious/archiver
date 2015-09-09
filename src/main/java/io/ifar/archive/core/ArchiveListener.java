@@ -66,12 +66,10 @@ public class ArchiveListener extends SmartListener
         this.archiveCluster = archiveCluster;
     }
 
-    public void batchComplete(String workUnit, boolean batchFailed) {
-        if (stopFlag.get())
-            return;
-        if (batchFailed) {
+    public void batchFailure(String workUnit) {
+        if (!stopFlag.get()) {
             int errors = failedBatches.getAndIncrement()+1;
-            LOG.info("Encountered error in archive worker {} (" + errors + " error(s) total)", workUnit);
+            LOG.warn("Encountered error in archive worker {} ({} error(s) total)", workUnit, errors);
             int successful = successfulBatches.get();
 
             if (errors >= errorLimitConfiguration.getTriesBeforeEnableErrorLimit()) {
@@ -87,7 +85,11 @@ public class ArchiveListener extends SmartListener
 
             }
 
-        } else
+        }
+    }
+
+    public void batchSuccess(String workUnit) {
+        if (!stopFlag.get())
             successfulBatches.getAndIncrement();
     }
 
