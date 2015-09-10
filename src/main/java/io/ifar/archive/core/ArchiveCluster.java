@@ -5,6 +5,8 @@ import io.dropwizard.lifecycle.Managed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public class ArchiveCluster implements Managed {
     static final Logger LOG = LoggerFactory.getLogger(ArchiveCluster.class);
 
@@ -23,4 +25,9 @@ public class ArchiveCluster implements Managed {
     public void stop() throws Exception {
         cluster.shutdown();
     }
+
+    public void stopAndWait(long waitTime, AtomicBoolean stopFlag) {
+        cluster.stopAndWait(waitTime, stopFlag);
+    }
+
 }
